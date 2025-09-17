@@ -14,11 +14,9 @@ import trimesh
 from .parameters import PrintingParameters
 from .steady_state import SteadyPhaseProfile, compute_steady_phase_profile
 
-
 TARGET_WIDTH = 4096
 TARGET_HEIGHT = 2160
 TARGET_MODE = "L"
-
 
 @dataclass
 class SlicingResult:
@@ -82,9 +80,11 @@ class ConvexSlicer:
             "print_head_radius": self.params.print_head_radius,
             "meniscus_scale": scale,
             "control_points": self.profile.control_points.tolist(),
+
             "image_width": TARGET_WIDTH,
             "image_height": TARGET_HEIGHT,
             "bit_depth": 8,
+
         }
 
         for frame in range(num_frames):
@@ -164,6 +164,7 @@ def _save_mask(output_dir: Path, index: int, mask: np.ndarray) -> None:
 
 def _render_frame(mask: np.ndarray) -> "Image.Image":
     """Project the boolean mask onto the 4K target canvas."""
+    """Write the mask as an 8-bit BMP image."""
 
     from PIL import Image
 
@@ -184,3 +185,6 @@ def _render_frame(mask: np.ndarray) -> "Image.Image":
     top = (TARGET_HEIGHT - scaled_height) // 2
     canvas.paste(resized, (left, top))
     return canvas
+
+    image = Image.fromarray(array)
+    image.save(output_dir / f"frame_{index:04d}.bmp")

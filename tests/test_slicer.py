@@ -4,7 +4,9 @@ import json
 from pathlib import Path
 
 import pytest
+
 from PIL import Image
+
 import trimesh
 
 from convex_slicer.cli import DEFAULT_PARAMS
@@ -29,6 +31,7 @@ def test_slicer_generates_expected_number_of_frames(tmp_path: Path):
     with Image.open(first_frame) as frame:
         assert frame.size == (4096, 2160)
         assert frame.mode == "L"
+
 
     metadata_path = output_dir / "metadata.json"
     assert metadata_path.exists()

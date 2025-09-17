@@ -11,8 +11,7 @@
   coefficients).
 - Voxelises the mesh and generates a sequence of BMP frames that follow the
   curved meniscus for each pitch increment.
-- Outputs LRS MCx-compliant 4K DCI BMP frames (4096 × 2160, 8-bit grayscale)
-  ready for the LAMA workflow.
+  
 - Writes metadata describing the slicing run (pitch, voxel size, meniscus
   control points and scaling).
 

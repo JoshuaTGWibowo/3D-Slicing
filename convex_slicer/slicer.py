@@ -14,6 +14,9 @@ import trimesh
 from .parameters import PrintingParameters
 from .steady_state import SteadyPhaseProfile, compute_steady_phase_profile
 
+TARGET_WIDTH = 4096
+TARGET_HEIGHT = 2160
+TARGET_MODE = "L"
 
 @dataclass
 class SlicingResult:
@@ -77,6 +80,11 @@ class ConvexSlicer:
             "print_head_radius": self.params.print_head_radius,
             "meniscus_scale": scale,
             "control_points": self.profile.control_points.tolist(),
+
+            "image_width": TARGET_WIDTH,
+            "image_height": TARGET_HEIGHT,
+            "bit_depth": 8,
+
         }
 
         for frame in range(num_frames):
@@ -148,10 +156,35 @@ def _slice_mask(
 
 
 def _save_mask(output_dir: Path, index: int, mask: np.ndarray) -> None:
+    """Write the mask as an 8-bit BMP image with 4K DCI resolution."""
+
+    frame = _render_frame(mask)
+    frame.save(output_dir / f"frame_{index:04d}.bmp", format="BMP")
+
+
+def _render_frame(mask: np.ndarray) -> "Image.Image":
+    """Project the boolean mask onto the 4K target canvas."""
     """Write the mask as an 8-bit BMP image."""
 
     from PIL import Image
 
     array = (mask.astype(np.uint8) * 255).T[::-1, :]
+    base_image = Image.fromarray(array).convert(TARGET_MODE)
+    if base_image.size == (TARGET_WIDTH, TARGET_HEIGHT):
+        return base_image
+
+    width_scale = TARGET_WIDTH / base_image.width if base_image.width else 1.0
+    height_scale = TARGET_HEIGHT / base_image.height if base_image.height else 1.0
+    scale = min(width_scale, height_scale)
+    scaled_width = max(1, min(TARGET_WIDTH, int(round(base_image.width * scale))))
+    scaled_height = max(1, min(TARGET_HEIGHT, int(round(base_image.height * scale))))
+
+    resized = base_image.resize((scaled_width, scaled_height), resample=Image.NEAREST)
+    canvas = Image.new(TARGET_MODE, (TARGET_WIDTH, TARGET_HEIGHT), color=0)
+    left = (TARGET_WIDTH - scaled_width) // 2
+    top = (TARGET_HEIGHT - scaled_height) // 2
+    canvas.paste(resized, (left, top))
+    return canvas
+
     image = Image.fromarray(array)
     image.save(output_dir / f"frame_{index:04d}.bmp")

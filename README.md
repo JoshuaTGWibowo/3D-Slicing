@@ -11,6 +11,7 @@
   coefficients).
 - Voxelises the mesh and generates a sequence of BMP frames that follow the
   curved meniscus for each pitch increment.
+  
 - Writes metadata describing the slicing run (pitch, voxel size, meniscus
   control points and scaling).
 

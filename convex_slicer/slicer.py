@@ -6,10 +6,11 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 import numpy as np
 import trimesh
+from shapely.geometry import Polygon
 
 from .parameters import PrintingParameters
 from .steady_state import SteadyPhaseProfile, compute_steady_phase_profile
@@ -17,6 +18,8 @@ from .steady_state import SteadyPhaseProfile, compute_steady_phase_profile
 TARGET_WIDTH = 4096
 TARGET_HEIGHT = 2160
 TARGET_MODE = "L"
+SUPERSAMPLE_FACTOR = 2
+
 
 @dataclass
 class SlicingResult:
@@ -26,6 +29,32 @@ class SlicingResult:
     num_frames: int
     pitch: float
     voxel_size: float
+
+
+@dataclass
+class CanvasTransform:
+    """Affine transform between XY coordinates and the 4K canvas."""
+
+    xy_min: np.ndarray
+    xy_max: np.ndarray
+    scale: float
+    offset_x: float
+    offset_y: float
+
+    @classmethod
+    def from_bounds(cls, bounds: np.ndarray) -> "CanvasTransform":
+        xy_min = bounds[0].astype(float)
+        xy_max = bounds[1].astype(float)
+        raw_extent = xy_max - xy_min
+        extent = np.where(raw_extent > 0, raw_extent, 1.0)
+        width_scale = TARGET_WIDTH / extent[0] if extent[0] > 0 else float("inf")
+        height_scale = TARGET_HEIGHT / extent[1] if extent[1] > 0 else float("inf")
+        scale = min(width_scale, height_scale)
+        scaled_width = extent[0] * scale
+        scaled_height = extent[1] * scale
+        offset_x = (TARGET_WIDTH - scaled_width) / 2.0
+        offset_y = (TARGET_HEIGHT - scaled_height) / 2.0
+        return cls(xy_min=xy_min, xy_max=xy_max, scale=scale, offset_x=offset_x, offset_y=offset_y)
 
 
 class ConvexSlicer:
@@ -49,25 +78,16 @@ class ConvexSlicer:
 
         mesh = self._load_mesh(stl_path)
         mesh = self._prepare_mesh(mesh)
-        voxel_grid = mesh.voxelized(self.voxel_size).fill()
-        occupancy = voxel_grid.matrix.astype(bool)
-        transform = voxel_grid.transform
-        x_coords, y_coords, z_coords = _axis_coordinates(transform, occupancy.shape)
-
-        xx, yy = np.meshgrid(x_coords, y_coords, indexing="ij", sparse=False)
-        radii = np.sqrt(xx**2 + yy**2)
-        surface_offsets = self.profile.height(radii)
 
         model_height = mesh.bounds[1, 2] - self.params.rim_start_height
         scale = 1.0
         if self.profile.max_height >= model_height and self.profile.max_height > 0:
             scale = 0.8 * model_height / self.profile.max_height
-            surface_offsets *= scale
 
-        base_surface = self.params.rim_start_height + surface_offsets
+        warped_mesh = _warp_mesh(mesh, self.params, self.profile, scale)
+        transform = CanvasTransform.from_bounds(mesh.bounds[:, :2])
 
         num_frames = max(int(math.ceil(model_height / self.pitch)), 1)
-        z_coords = np.asarray(z_coords)
 
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -80,18 +100,16 @@ class ConvexSlicer:
             "print_head_radius": self.params.print_head_radius,
             "meniscus_scale": scale,
             "control_points": self.profile.control_points.tolist(),
-
             "image_width": TARGET_WIDTH,
             "image_height": TARGET_HEIGHT,
             "bit_depth": 8,
-
         }
 
         for frame in range(num_frames):
-            lower = base_surface + frame * self.pitch
-            upper = lower + self.pitch
-            slice_mask = _slice_mask(occupancy, z_coords, lower, upper)
-            _save_mask(output_dir, frame, slice_mask)
+            plane_z = (frame + 0.5) * self.pitch
+            polygons = _cross_section_polygons(warped_mesh, plane_z)
+            image = _render_polygons(polygons, transform)
+            image.save(output_dir / f"frame_{frame:04d}.bmp", format="BMP")
 
         with (output_dir / "metadata.json").open("w", encoding="utf-8") as fp:
             json.dump(metadata, fp, indent=2)
@@ -124,67 +142,81 @@ class ConvexSlicer:
         return mesh
 
 
-def _axis_coordinates(transform: np.ndarray, shape: Iterable[int]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Compute coordinate arrays for the voxel grid axes."""
+def _warp_mesh(
+    mesh: trimesh.Trimesh,
+    params: PrintingParameters,
+    profile: SteadyPhaseProfile,
+    scale: float,
+) -> trimesh.Trimesh:
+    """Warp the mesh so that convex slices become planar in ``z``."""
 
-    shape = tuple(int(v) for v in shape)
-    origin = transform @ np.array([0.0, 0.0, 0.0, 1.0])
-    axis_vectors = (
-        transform @ np.array([1.0, 0.0, 0.0, 0.0]),
-        transform @ np.array([0.0, 1.0, 0.0, 0.0]),
-        transform @ np.array([0.0, 0.0, 1.0, 0.0]),
-    )
-    x_coords = origin[0] + axis_vectors[0][0] * np.arange(shape[0])
-    y_coords = origin[1] + axis_vectors[1][1] * np.arange(shape[1])
-    z_coords = origin[2] + axis_vectors[2][2] * np.arange(shape[2])
-    return x_coords, y_coords, z_coords
-
-
-def _slice_mask(
-    occupancy: np.ndarray,
-    z_coords: np.ndarray,
-    lower: np.ndarray,
-    upper: np.ndarray,
-) -> np.ndarray:
-    """Compute a binary mask for a slice between ``lower`` and ``upper`` surfaces."""
-
-    z_grid = z_coords[np.newaxis, np.newaxis, :]
-    within = (z_grid >= lower[..., np.newaxis]) & (z_grid < upper[..., np.newaxis])
-    hits = occupancy & within
-    mask = np.any(hits, axis=2)
-    return mask
+    vertices = mesh.vertices.copy()
+    radii = np.linalg.norm(vertices[:, :2], axis=1)
+    meniscus_offsets = profile.height(radii) * scale
+    total_offsets = params.rim_start_height + meniscus_offsets
+    warped_vertices = vertices.copy()
+    warped_vertices[:, 2] = vertices[:, 2] - total_offsets
+    return trimesh.Trimesh(vertices=warped_vertices, faces=mesh.faces, process=False)
 
 
-def _save_mask(output_dir: Path, index: int, mask: np.ndarray) -> None:
-    """Write the mask as an 8-bit BMP image with 4K DCI resolution."""
+def _cross_section_polygons(mesh: trimesh.Trimesh, height: float) -> list[Polygon]:
+    """Intersect ``mesh`` with the horizontal plane at ``height``."""
 
-    frame = _render_frame(mask)
-    frame.save(output_dir / f"frame_{index:04d}.bmp", format="BMP")
+    if height < 0:
+        return []
+
+    section = mesh.section(plane_origin=[0.0, 0.0, float(height)], plane_normal=[0.0, 0.0, 1.0])
+    if section is None or not section.entities:
+        return []
+
+    if hasattr(section, "to_2D"):
+        planar, _ = section.to_2D()
+    else:  # pragma: no cover - compatibility with older trimesh versions
+        planar, _ = section.to_planar()
+    polygons = [poly for poly in planar.polygons_full if not poly.is_empty]
+    return polygons
 
 
-def _render_frame(mask: np.ndarray) -> "Image.Image":
-    """Project the boolean mask onto the 4K target canvas."""
-    """Write the mask as an 8-bit BMP image."""
+def _render_polygons(polygons: Sequence[Polygon], transform: CanvasTransform) -> "Image.Image":
+    """Rasterise polygons onto the 4K canvas with supersampling."""
 
-    from PIL import Image
+    from PIL import Image, ImageDraw
 
-    array = (mask.astype(np.uint8) * 255).T[::-1, :]
-    base_image = Image.fromarray(array).convert(TARGET_MODE)
-    if base_image.size == (TARGET_WIDTH, TARGET_HEIGHT):
-        return base_image
+    if not polygons:
+        return Image.new(TARGET_MODE, (TARGET_WIDTH, TARGET_HEIGHT), color=0)
 
-    width_scale = TARGET_WIDTH / base_image.width if base_image.width else 1.0
-    height_scale = TARGET_HEIGHT / base_image.height if base_image.height else 1.0
-    scale = min(width_scale, height_scale)
-    scaled_width = max(1, min(TARGET_WIDTH, int(round(base_image.width * scale))))
-    scaled_height = max(1, min(TARGET_HEIGHT, int(round(base_image.height * scale))))
+    oversample = max(int(SUPERSAMPLE_FACTOR), 1)
+    canvas_size = (TARGET_WIDTH * oversample, TARGET_HEIGHT * oversample)
+    canvas = Image.new(TARGET_MODE, canvas_size, color=0)
+    draw = ImageDraw.Draw(canvas)
 
-    resized = base_image.resize((scaled_width, scaled_height), resample=Image.NEAREST)
-    canvas = Image.new(TARGET_MODE, (TARGET_WIDTH, TARGET_HEIGHT), color=0)
-    left = (TARGET_WIDTH - scaled_width) // 2
-    top = (TARGET_HEIGHT - scaled_height) // 2
-    canvas.paste(resized, (left, top))
+    scale = transform.scale * oversample
+    offset_x = transform.offset_x * oversample
+    offset_y = transform.offset_y * oversample
+    xy_min = transform.xy_min
+    xy_max = transform.xy_max
+
+    def project(points: Iterable[tuple[float, float]]) -> list[tuple[float, float]]:
+        coords: list[tuple[float, float]] = []
+        for x, y in points:
+            px = (x - xy_min[0]) * scale + offset_x
+            py = (xy_max[1] - y) * scale + offset_y
+            coords.append((px, py))
+        return coords
+
+    for polygon in polygons:
+        if polygon.is_empty:
+            continue
+        exterior = project(polygon.exterior.coords)
+        if len(exterior) >= 3:
+            draw.polygon(exterior, fill=255)
+        for interior in polygon.interiors:
+            hole = project(interior.coords)
+            if len(hole) >= 3:
+                draw.polygon(hole, fill=0)
+
+    if oversample > 1:
+        resampling = getattr(Image, "Resampling", Image)
+        canvas = canvas.resize((TARGET_WIDTH, TARGET_HEIGHT), resample=resampling.LANCZOS)
+
     return canvas
-
-    image = Image.fromarray(array)
-    image.save(output_dir / f"frame_{index:04d}.bmp")

@@ -9,8 +9,9 @@
 - Computes a steady-phase convex meniscus using the supplied physics parameters
   (surface tension, density, gravity, print-head geometry, Bézier control
   coefficients).
-- Voxelises the mesh and generates a sequence of BMP frames that follow the
-  curved meniscus for each pitch increment.
+- Intersects the mesh geometry with each convex slicing plane to obtain
+  high-fidelity polygonal cross-sections and rasterises them with
+  anti-aliasing at 4K resolution.
   
 - Writes metadata describing the slicing run (pitch, voxel size, meniscus
   control points and scaling).
@@ -28,7 +29,8 @@ python -m convex_slicer.cli path/to/model.stl output_directory --pitch 0.05
 
 Optional arguments:
 
-- `--voxel-size`: specify a custom voxel size (defaults to the pitch).
+- `--voxel-size`: legacy argument retained for compatibility; geometric
+  slicing no longer uses an intermediate voxel grid.
 - `--params`: path to a JSON file overriding the default material and geometry
   parameters.
 

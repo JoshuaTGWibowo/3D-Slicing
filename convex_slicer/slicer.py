@@ -64,8 +64,6 @@ class ConvexSlicer:
             scale = 0.8 * model_height / self.profile.max_height
             surface_offsets *= scale
 
-        base_surface = self.params.rim_start_height + surface_offsets
-
         num_frames = max(int(math.ceil(model_height / self.pitch)), 1)
         z_coords = np.asarray(z_coords)
 
@@ -88,9 +86,15 @@ class ConvexSlicer:
         }
 
         for frame in range(num_frames):
-            lower = base_surface + frame * self.pitch
+            lower = self.params.rim_start_height + frame * self.pitch
             upper = lower + self.pitch
-            slice_mask = _slice_mask(occupancy, z_coords, lower, upper)
+            slice_mask = _slice_mask(
+                occupancy,
+                z_coords,
+                lower,
+                upper,
+                surface_offsets,
+            )
             _save_mask(output_dir, frame, slice_mask)
 
         with (output_dir / "metadata.json").open("w", encoding="utf-8") as fp:
@@ -143,13 +147,15 @@ def _axis_coordinates(transform: np.ndarray, shape: Iterable[int]) -> tuple[np.n
 def _slice_mask(
     occupancy: np.ndarray,
     z_coords: np.ndarray,
-    lower: np.ndarray,
-    upper: np.ndarray,
+    lower: float,
+    upper: float,
+    meniscus_offsets: np.ndarray,
 ) -> np.ndarray:
-    """Compute a binary mask for a slice between ``lower`` and ``upper`` surfaces."""
+    """Compute a binary mask for a slice between ``lower`` and ``upper`` planes."""
 
-    z_grid = z_coords[np.newaxis, np.newaxis, :]
-    within = (z_grid >= lower[..., np.newaxis]) & (z_grid < upper[..., np.newaxis])
+    meniscus_offsets = np.asarray(meniscus_offsets)
+    z_grid = z_coords[np.newaxis, np.newaxis, :] - meniscus_offsets[..., np.newaxis]
+    within = (z_grid >= lower) & (z_grid < upper)
     hits = occupancy & within
     mask = np.any(hits, axis=2)
     return mask

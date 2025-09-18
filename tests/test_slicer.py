@@ -9,6 +9,8 @@ from PIL import Image
 
 import trimesh
 
+import numpy as np
+
 from convex_slicer.cli import DEFAULT_PARAMS
 from convex_slicer.slicer import ConvexSlicer
 
@@ -31,6 +33,9 @@ def test_slicer_generates_expected_number_of_frames(tmp_path: Path):
     with Image.open(first_frame) as frame:
         assert frame.size == (4096, 2160)
         assert frame.mode == "L"
+        pixels = np.asarray(frame)
+        assert pixels.shape == (2160, 4096)
+        assert pixels[frame.height // 2, frame.width // 2] == 255
 
 
     metadata_path = output_dir / "metadata.json"

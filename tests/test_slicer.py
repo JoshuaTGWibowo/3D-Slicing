@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from PIL import Image
@@ -30,7 +31,18 @@ def test_slicer_generates_expected_number_of_frames(tmp_path: Path):
 
     with Image.open(first_frame) as frame:
         assert frame.size == (4096, 2160)
-        assert frame.mode == "L"
+        assert frame.mode == "RGB"
+        first_array = np.asarray(frame)
+
+    with Image.open(last_frame) as frame:
+        assert frame.mode == "RGB"
+        last_array = np.asarray(frame)
+
+    first_nonzero = first_array.reshape(-1, 3)[np.any(first_array.reshape(-1, 3) != 0, axis=1)]
+    last_nonzero = last_array.reshape(-1, 3)[np.any(last_array.reshape(-1, 3) != 0, axis=1)]
+    assert first_nonzero.size > 0
+    assert last_nonzero.size > 0
+    assert last_nonzero.mean() > first_nonzero.mean()
 
 
     metadata_path = output_dir / "metadata.json"
@@ -41,3 +53,4 @@ def test_slicer_generates_expected_number_of_frames(tmp_path: Path):
     assert metadata["image_width"] == 4096
     assert metadata["image_height"] == 2160
     assert metadata["bit_depth"] == 8
+    assert metadata["color_mode"] == "RGB"

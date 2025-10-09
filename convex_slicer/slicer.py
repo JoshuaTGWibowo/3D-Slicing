@@ -1,4 +1,5 @@
-"""Core slicing logic."""
+
+"""Core slicing logic with gradient-colored output (interface/height mapped to RGB)."""
 
 from __future__ import annotations
 
@@ -14,9 +15,11 @@ import trimesh
 from .parameters import PrintingParameters
 from .steady_state import SteadyPhaseProfile, compute_steady_phase_profile
 
+
 TARGET_WIDTH = 4096
 TARGET_HEIGHT = 2160
-TARGET_MODE = "L"
+TARGET_MODE = "RGB"  # changed from "L": we now emit 24‑bit color BMPs
+
 
 @dataclass
 class SlicingResult:
@@ -29,7 +32,7 @@ class SlicingResult:
 
 
 class ConvexSlicer:
-    """Generate convex slices for an STL model."""
+    """Generate convex slices for an STL model with gradient colors."""
 
     def __init__(
         self,
@@ -64,13 +67,21 @@ class ConvexSlicer:
             scale = 0.8 * model_height / self.profile.max_height
             surface_offsets *= scale
 
-        base_surface = self.params.rim_start_height + surface_offsets
+        meniscus_peak = float(surface_offsets.max())  # how much higher the rim is than the center
+        base_surface = self.params.rim_start_height + surface_offsets - meniscus_peak
 
-        num_frames = max(int(math.ceil(model_height / self.pitch)), 1)
+        total_travel = model_height + meniscus_peak
+        num_frames = max(int(math.ceil(total_travel / self.pitch)), 1)
         z_coords = np.asarray(z_coords)
 
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Choose a global color scale so colors are comparable across frames.
+        # We encode the *absolute* interface height being printed at each (x,y).
+        vmin = float(base_surface.min())
+        vmax = float((base_surface + total_travel).max())
+        vspan = max(vmax - vmin, 1e-6)
 
         metadata = {
             "pitch": self.pitch,
@@ -80,18 +91,25 @@ class ConvexSlicer:
             "print_head_radius": self.params.print_head_radius,
             "meniscus_scale": scale,
             "control_points": self.profile.control_points.tolist(),
-
             "image_width": TARGET_WIDTH,
             "image_height": TARGET_HEIGHT,
-            "bit_depth": 8,
-
+            "bit_depth": 24,
+            "color_mode": TARGET_MODE,
+            "color_scale_min": vmin,
+            "color_scale_max": vmax,
+            "colormap": "viridis-like",
         }
 
         for frame in range(num_frames):
             lower = base_surface + frame * self.pitch
             upper = lower + self.pitch
-            slice_mask = _slice_mask(occupancy, z_coords, lower, upper)
-            _save_mask(output_dir, frame, slice_mask)
+            height_map, mask = _slice_height_map(occupancy, z_coords, lower, upper)
+            # Normalise to [0, 1] using the global range
+            norm = np.clip((height_map - vmin) / vspan, 0.0, 1.0)
+            rgb = _apply_colormap(norm)
+            # Zero-out background
+            rgb[~mask] = 0
+            _save_rgb_frame(output_dir, frame, rgb)
 
         with (output_dir / "metadata.json").open("w", encoding="utf-8") as fp:
             json.dump(metadata, fp, indent=2)
@@ -140,36 +158,87 @@ def _axis_coordinates(transform: np.ndarray, shape: Iterable[int]) -> tuple[np.n
     return x_coords, y_coords, z_coords
 
 
-def _slice_mask(
+def _slice_height_map(
     occupancy: np.ndarray,
     z_coords: np.ndarray,
     lower: np.ndarray,
     upper: np.ndarray,
-) -> np.ndarray:
-    """Compute a binary mask for a slice between ``lower`` and ``upper`` surfaces."""
-
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (height_map, mask) for a slice band.
+    height_map contains the *maximum* z coordinate of occupied voxels within the band,
+    per (x, y). mask is True where the band intersects the model.
+    """
     z_grid = z_coords[np.newaxis, np.newaxis, :]
     within = (z_grid >= lower[..., np.newaxis]) & (z_grid < upper[..., np.newaxis])
     hits = occupancy & within
-    mask = np.any(hits, axis=2)
-    return mask
+
+    # Use NaNs to compute per-(x,y) maxima only where we have hits
+    with np.errstate(invalid="ignore"):
+        z_vals = np.where(hits, z_grid, np.nan)
+        height_map = np.nanmax(z_vals, axis=2)
+
+    mask = np.isfinite(height_map)
+    height_map[~mask] = 0.0
+    return height_map.astype(np.float32), mask
 
 
-def _save_mask(output_dir: Path, index: int, mask: np.ndarray) -> None:
-    """Write the mask as an 8-bit BMP image with 4K DCI resolution."""
+# ---------- Color mapping utilities ----------
 
-    frame = _render_frame(mask)
+def _build_viridis_like_lut() -> np.ndarray:
+    """Construct a small viridis-like 256x3 LUT (uint8)."""
+    # Key color stops (t, r, g, b)
+    stops = np.array([
+        [0.00, 68,   1,  84],   # deep purple
+        [0.25, 59,  82, 139],   # indigo
+        [0.50, 33, 145, 140],   # teal
+        [0.75, 94, 201,  98],   # green
+        [1.00, 253, 231, 37],   # yellow
+    ], dtype=float)
+
+    lut = np.zeros((256, 3), dtype=np.uint8)
+    ts = stops[:, 0]
+    colors = stops[:, 1:4]
+    for i in range(256):
+        t = i / 255.0
+        j = np.searchsorted(ts, t, side="right") - 1
+        j = np.clip(j, 0, len(ts) - 2)
+        t0, t1 = ts[j], ts[j + 1]
+        c0, c1 = colors[j], colors[j + 1]
+        u = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+        c = (1 - u) * c0 + u * c1
+        lut[i] = np.clip(np.round(c), 0, 255).astype(np.uint8)
+    return lut
+
+
+_VIRIDIS_LUT = _build_viridis_like_lut()
+
+
+def _apply_colormap(norm: np.ndarray) -> np.ndarray:
+    """Map a [0,1] float array to RGB using a viridis-like LUT."""
+    idx = np.clip((norm * 255.0).astype(np.uint8), 0, 255)
+    return _VIRIDIS_LUT[idx]
+
+
+# ---------- Rendering ----------
+
+def _save_rgb_frame(output_dir: Path, index: int, rgb: np.ndarray) -> None:
+    """Write the RGB frame as a 24-bit BMP image with 4K DCI resolution."""
+    frame = _render_rgb(rgb)
     frame.save(output_dir / f"frame_{index:04d}.bmp", format="BMP")
 
 
-def _render_frame(mask: np.ndarray) -> "Image.Image":
-    """Project the boolean mask onto the 4K target canvas."""
-    """Write the mask as an 8-bit BMP image."""
+def _render_rgb(rgb: np.ndarray) -> "Image.Image":
+    """Project the RGB array (H=W=voxel grid) onto the 4K target canvas.
 
+    The orientation mirrors the previous grayscale pipeline: transpose then
+    flip vertically so on-screen matches the conventional top‑down view.
+    """
     from PIL import Image
 
-    array = (mask.astype(np.uint8) * 255).T[::-1, :]
-    base_image = Image.fromarray(array).convert(TARGET_MODE)
+    # rgb is (X, Y, 3) – match legacy orientation
+    array = rgb.transpose(1, 0, 2)[::-1, :, :]
+    base_image = Image.fromarray(array, mode=TARGET_MODE)
+
     if base_image.size == (TARGET_WIDTH, TARGET_HEIGHT):
         return base_image
 
@@ -180,11 +249,8 @@ def _render_frame(mask: np.ndarray) -> "Image.Image":
     scaled_height = max(1, min(TARGET_HEIGHT, int(round(base_image.height * scale))))
 
     resized = base_image.resize((scaled_width, scaled_height), resample=Image.NEAREST)
-    canvas = Image.new(TARGET_MODE, (TARGET_WIDTH, TARGET_HEIGHT), color=0)
+    canvas = Image.new(TARGET_MODE, (TARGET_WIDTH, TARGET_HEIGHT), color=(0, 0, 0))
     left = (TARGET_WIDTH - scaled_width) // 2
     top = (TARGET_HEIGHT - scaled_height) // 2
     canvas.paste(resized, (left, top))
     return canvas
-
-    image = Image.fromarray(array)
-    image.save(output_dir / f"frame_{index:04d}.bmp")

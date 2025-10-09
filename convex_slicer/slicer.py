@@ -16,7 +16,7 @@ from .steady_state import SteadyPhaseProfile, compute_steady_phase_profile
 
 TARGET_WIDTH = 4096
 TARGET_HEIGHT = 2160
-TARGET_MODE = "L"
+TARGET_MODE = "1"
 
 @dataclass
 class SlicingResult:
@@ -83,7 +83,8 @@ class ConvexSlicer:
 
             "image_width": TARGET_WIDTH,
             "image_height": TARGET_HEIGHT,
-            "bit_depth": 8,
+            # "inference_height": TARGET_HEIGHT,
+            "bit_depth": 1,
 
         }
 
@@ -156,7 +157,7 @@ def _slice_mask(
 
 
 def _save_mask(output_dir: Path, index: int, mask: np.ndarray) -> None:
-    """Write the mask as an 8-bit BMP image with 4K DCI resolution."""
+    """Write the mask as a 1-bit BMP image with 4K DCI resolution."""
 
     frame = _render_frame(mask)
     frame.save(output_dir / f"frame_{index:04d}.bmp", format="BMP")
@@ -164,14 +165,13 @@ def _save_mask(output_dir: Path, index: int, mask: np.ndarray) -> None:
 
 def _render_frame(mask: np.ndarray) -> "Image.Image":
     """Project the boolean mask onto the 4K target canvas."""
-    """Write the mask as an 8-bit BMP image."""
 
     from PIL import Image
 
     array = (mask.astype(np.uint8) * 255).T[::-1, :]
-    base_image = Image.fromarray(array).convert(TARGET_MODE)
+    base_image = Image.fromarray(array, mode="L")
     if base_image.size == (TARGET_WIDTH, TARGET_HEIGHT):
-        return base_image
+        return base_image.convert(TARGET_MODE, dither=Image.NONE)
 
     width_scale = TARGET_WIDTH / base_image.width if base_image.width else 1.0
     height_scale = TARGET_HEIGHT / base_image.height if base_image.height else 1.0
@@ -180,11 +180,8 @@ def _render_frame(mask: np.ndarray) -> "Image.Image":
     scaled_height = max(1, min(TARGET_HEIGHT, int(round(base_image.height * scale))))
 
     resized = base_image.resize((scaled_width, scaled_height), resample=Image.NEAREST)
-    canvas = Image.new(TARGET_MODE, (TARGET_WIDTH, TARGET_HEIGHT), color=0)
+    canvas = Image.new("L", (TARGET_WIDTH, TARGET_HEIGHT), color=0)
     left = (TARGET_WIDTH - scaled_width) // 2
     top = (TARGET_HEIGHT - scaled_height) // 2
     canvas.paste(resized, (left, top))
-    return canvas
-
-    image = Image.fromarray(array)
-    image.save(output_dir / f"frame_{index:04d}.bmp")
+    return canvas.convert(TARGET_MODE, dither=Image.NONE)

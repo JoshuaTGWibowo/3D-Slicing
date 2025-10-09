@@ -32,7 +32,7 @@ Optional arguments:
 - `--params`: path to a JSON file overriding the default material and geometry
   parameters.
 
-Each frame is written as an 8-bit monochrome BMP named `frame_XXXX.bmp`. The
+Each frame is written as a 1-bit monochrome 4K BMP named `frame_XXXX.bmp`. The
 `slicing/metadata.json` file captures the parameters used for the run.
 
 ## Default parameters

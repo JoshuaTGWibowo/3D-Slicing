@@ -30,7 +30,7 @@ def test_slicer_generates_expected_number_of_frames(tmp_path: Path):
 
     with Image.open(first_frame) as frame:
         assert frame.size == (4096, 2160)
-        assert frame.mode == "L"
+        assert frame.mode == "1"
 
 
     metadata_path = output_dir / "metadata.json"
@@ -40,4 +40,4 @@ def test_slicer_generates_expected_number_of_frames(tmp_path: Path):
     assert metadata["num_frames"] == 40
     assert metadata["image_width"] == 4096
     assert metadata["image_height"] == 2160
-    assert metadata["bit_depth"] == 8
+    assert metadata["bit_depth"] == 1

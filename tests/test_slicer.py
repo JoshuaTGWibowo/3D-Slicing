@@ -41,3 +41,5 @@ def test_slicer_generates_expected_number_of_frames(tmp_path: Path):
     assert metadata["image_width"] == 4096
     assert metadata["image_height"] == 2160
     assert metadata["bit_depth"] == 1
+    assert metadata["pixels_per_mm"] == pytest.approx(50.0)
+    assert metadata["voxel_size"] == pytest.approx(0.01)

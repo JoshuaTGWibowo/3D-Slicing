@@ -19,6 +19,8 @@ from .steady_state import SteadyPhaseProfile, compute_steady_phase_profile
 TARGET_WIDTH = 4096
 TARGET_HEIGHT = 2160
 TARGET_MODE = "1"  # emit 1-bit monochrome BMPs
+PIXELS_PER_MM = 50.0
+DEFAULT_VOXEL_SIZE = 0.01
 
 
 @dataclass
@@ -44,7 +46,9 @@ class ConvexSlicer:
     ) -> None:
         self.params = params
         self.pitch = float(pitch)
-        self.voxel_size = float(voxel_size) if voxel_size is not None else float(pitch)
+        self.voxel_size = (
+            float(voxel_size) if voxel_size is not None else DEFAULT_VOXEL_SIZE
+        )
         self.profile = profile or compute_steady_phase_profile(params)
 
     def slice(self, stl_path: Path, output_dir: Path) -> SlicingResult:
@@ -96,6 +100,7 @@ class ConvexSlicer:
             "image_height": TARGET_HEIGHT,
             "bit_depth": 1,
             "color_mode": TARGET_MODE,
+            "pixels_per_mm": PIXELS_PER_MM,
             # "color_scale_min": vmin,
             # "color_scale_max": vmax,
             # "colormap": "viridis-like",
@@ -106,7 +111,7 @@ class ConvexSlicer:
             upper = lower + self.pitch
             height_map, mask = _slice_height_map(occupancy, z_coords, lower, upper)
             bitmap = np.where(mask, 255, 0).astype(np.uint8)
-            _save_bitmap_frame(output_dir, frame, bitmap)
+            _save_bitmap_frame(output_dir, frame, bitmap, self.voxel_size)
 
         with (output_dir / "metadata.json").open("w", encoding="utf-8") as fp:
             json.dump(metadata, fp, indent=2)
@@ -179,13 +184,15 @@ def _slice_height_map(
     return height_map.astype(np.float32), mask
 
 
-def _save_bitmap_frame(output_dir: Path, index: int, bitmap: np.ndarray) -> None:
+def _save_bitmap_frame(
+    output_dir: Path, index: int, bitmap: np.ndarray, voxel_size: float
+) -> None:
     """Write the binary frame as a 1-bit BMP image with 4K DCI resolution."""
-    frame = _render_bitmap(bitmap)
+    frame = _render_bitmap(bitmap, voxel_size)
     frame.save(output_dir / f"frame_{index:04d}.bmp", format="BMP")
 
 
-def _render_bitmap(bitmap: np.ndarray) -> "Image.Image":
+def _render_bitmap(bitmap: np.ndarray, voxel_size: float) -> "Image.Image":
     """Project the binary array (H=W=voxel grid) onto the 4K target canvas.
 
     The orientation mirrors the previous grayscale pipeline: transpose then
@@ -196,18 +203,27 @@ def _render_bitmap(bitmap: np.ndarray) -> "Image.Image":
     array = bitmap.transpose(1, 0)[::-1, :]
     base_image = Image.fromarray(array).convert("1", dither=Image.Dither.NONE)
 
-    if base_image.size == (TARGET_WIDTH, TARGET_HEIGHT):
-        return base_image
+    desired_width = max(
+        1, int(round(base_image.width * voxel_size * PIXELS_PER_MM))
+    )
+    desired_height = max(
+        1, int(round(base_image.height * voxel_size * PIXELS_PER_MM))
+    )
 
-    width_scale = TARGET_WIDTH / base_image.width if base_image.width else 1.0
-    height_scale = TARGET_HEIGHT / base_image.height if base_image.height else 1.0
-    scale = min(width_scale, height_scale)
-    scaled_width = max(1, min(TARGET_WIDTH, int(round(base_image.width * scale))))
-    scaled_height = max(1, min(TARGET_HEIGHT, int(round(base_image.height * scale))))
+    if desired_width > TARGET_WIDTH or desired_height > TARGET_HEIGHT:
+        raise ValueError(
+            "Model footprint exceeds the printable area at 50 px/mm resolution"
+        )
 
-    resized = base_image.resize((scaled_width, scaled_height), resample=Image.NEAREST)
+    if (desired_width, desired_height) == base_image.size:
+        resized = base_image
+    else:
+        resized = base_image.resize(
+            (desired_width, desired_height), resample=Image.NEAREST
+        )
+
     canvas = Image.new(TARGET_MODE, (TARGET_WIDTH, TARGET_HEIGHT), color=0)
-    left = (TARGET_WIDTH - scaled_width) // 2
-    top = (TARGET_HEIGHT - scaled_height) // 2
+    left = (TARGET_WIDTH - desired_width) // 2
+    top = (TARGET_HEIGHT - desired_height) // 2
     canvas.paste(resized, (left, top))
     return canvas

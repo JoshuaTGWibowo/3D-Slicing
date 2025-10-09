@@ -1,5 +1,5 @@
 
-"""Core slicing logic with gradient-colored output (interface/height mapped to RGB)."""
+"""Core slicing logic emitting binary (1-bit) exposure masks as 4K BMP frames."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from .steady_state import SteadyPhaseProfile, compute_steady_phase_profile
 
 TARGET_WIDTH = 4096
 TARGET_HEIGHT = 2160
-TARGET_MODE = "RGB"  # changed from "L": we now emit 24‑bit color BMPs
+TARGET_MODE = "1"  # emit 1-bit monochrome BMPs
 
 
 @dataclass
@@ -32,7 +32,7 @@ class SlicingResult:
 
 
 class ConvexSlicer:
-    """Generate convex slices for an STL model with gradient colors."""
+    """Generate convex slices for an STL model as binary exposure masks."""
 
     def __init__(
         self,
@@ -77,11 +77,12 @@ class ConvexSlicer:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Choose a global color scale so colors are comparable across frames.
-        # We encode the *absolute* interface height being printed at each (x,y).
-        vmin = float(base_surface.min())
-        vmax = float((base_surface + total_travel).max())
-        vspan = max(vmax - vmin, 1e-6)
+        # Legacy color-scaling calculations retained for potential future use.
+        # They encode the *absolute* interface height being printed at each
+        # (x, y), but the binary export currently does not consume them.
+        # vmin = float(base_surface.min())
+        # vmax = float((base_surface + total_travel).max())
+        # vspan = max(vmax - vmin, 1e-6)
 
         metadata = {
             "pitch": self.pitch,
@@ -93,23 +94,19 @@ class ConvexSlicer:
             "control_points": self.profile.control_points.tolist(),
             "image_width": TARGET_WIDTH,
             "image_height": TARGET_HEIGHT,
-            "bit_depth": 24,
+            "bit_depth": 1,
             "color_mode": TARGET_MODE,
-            "color_scale_min": vmin,
-            "color_scale_max": vmax,
-            "colormap": "viridis-like",
+            # "color_scale_min": vmin,
+            # "color_scale_max": vmax,
+            # "colormap": "viridis-like",
         }
 
         for frame in range(num_frames):
             lower = base_surface + frame * self.pitch
             upper = lower + self.pitch
             height_map, mask = _slice_height_map(occupancy, z_coords, lower, upper)
-            # Normalise to [0, 1] using the global range
-            norm = np.clip((height_map - vmin) / vspan, 0.0, 1.0)
-            rgb = _apply_colormap(norm)
-            # Zero-out background
-            rgb[~mask] = 0
-            _save_rgb_frame(output_dir, frame, rgb)
+            bitmap = np.where(mask, 255, 0).astype(np.uint8)
+            _save_bitmap_frame(output_dir, frame, bitmap)
 
         with (output_dir / "metadata.json").open("w", encoding="utf-8") as fp:
             json.dump(metadata, fp, indent=2)
@@ -182,62 +179,22 @@ def _slice_height_map(
     return height_map.astype(np.float32), mask
 
 
-# ---------- Color mapping utilities ----------
-
-def _build_viridis_like_lut() -> np.ndarray:
-    """Construct a small viridis-like 256x3 LUT (uint8)."""
-    # Key color stops (t, r, g, b)
-    stops = np.array([
-        [0.00, 68,   1,  84],   # deep purple
-        [0.25, 59,  82, 139],   # indigo
-        [0.50, 33, 145, 140],   # teal
-        [0.75, 94, 201,  98],   # green
-        [1.00, 253, 231, 37],   # yellow
-    ], dtype=float)
-
-    lut = np.zeros((256, 3), dtype=np.uint8)
-    ts = stops[:, 0]
-    colors = stops[:, 1:4]
-    for i in range(256):
-        t = i / 255.0
-        j = np.searchsorted(ts, t, side="right") - 1
-        j = np.clip(j, 0, len(ts) - 2)
-        t0, t1 = ts[j], ts[j + 1]
-        c0, c1 = colors[j], colors[j + 1]
-        u = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
-        c = (1 - u) * c0 + u * c1
-        lut[i] = np.clip(np.round(c), 0, 255).astype(np.uint8)
-    return lut
-
-
-_VIRIDIS_LUT = _build_viridis_like_lut()
-
-
-def _apply_colormap(norm: np.ndarray) -> np.ndarray:
-    """Map a [0,1] float array to RGB using a viridis-like LUT."""
-    idx = np.clip((norm * 255.0).astype(np.uint8), 0, 255)
-    return _VIRIDIS_LUT[idx]
-
-
-# ---------- Rendering ----------
-
-def _save_rgb_frame(output_dir: Path, index: int, rgb: np.ndarray) -> None:
-    """Write the RGB frame as a 24-bit BMP image with 4K DCI resolution."""
-    frame = _render_rgb(rgb)
+def _save_bitmap_frame(output_dir: Path, index: int, bitmap: np.ndarray) -> None:
+    """Write the binary frame as a 1-bit BMP image with 4K DCI resolution."""
+    frame = _render_bitmap(bitmap)
     frame.save(output_dir / f"frame_{index:04d}.bmp", format="BMP")
 
 
-def _render_rgb(rgb: np.ndarray) -> "Image.Image":
-    """Project the RGB array (H=W=voxel grid) onto the 4K target canvas.
+def _render_bitmap(bitmap: np.ndarray) -> "Image.Image":
+    """Project the binary array (H=W=voxel grid) onto the 4K target canvas.
 
     The orientation mirrors the previous grayscale pipeline: transpose then
     flip vertically so on-screen matches the conventional top‑down view.
     """
     from PIL import Image
 
-    # rgb is (X, Y, 3) – match legacy orientation
-    array = rgb.transpose(1, 0, 2)[::-1, :, :]
-    base_image = Image.fromarray(array, mode=TARGET_MODE)
+    array = bitmap.transpose(1, 0)[::-1, :]
+    base_image = Image.fromarray(array).convert("1", dither=Image.Dither.NONE)
 
     if base_image.size == (TARGET_WIDTH, TARGET_HEIGHT):
         return base_image
@@ -249,7 +206,7 @@ def _render_rgb(rgb: np.ndarray) -> "Image.Image":
     scaled_height = max(1, min(TARGET_HEIGHT, int(round(base_image.height * scale))))
 
     resized = base_image.resize((scaled_width, scaled_height), resample=Image.NEAREST)
-    canvas = Image.new(TARGET_MODE, (TARGET_WIDTH, TARGET_HEIGHT), color=(0, 0, 0))
+    canvas = Image.new(TARGET_MODE, (TARGET_WIDTH, TARGET_HEIGHT), color=0)
     left = (TARGET_WIDTH - scaled_width) // 2
     top = (TARGET_HEIGHT - scaled_height) // 2
     canvas.paste(resized, (left, top))

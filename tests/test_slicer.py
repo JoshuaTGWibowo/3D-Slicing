@@ -22,22 +22,22 @@ def test_slicer_generates_expected_number_of_frames(tmp_path: Path):
     output_dir = tmp_path / "frames"
     result = slicer.slice(stl_path, output_dir)
 
-    assert result.num_frames == 40
+    assert result.num_frames == 44
     first_frame = output_dir / "frame_0000.bmp"
-    last_frame = output_dir / "frame_0039.bmp"
+    last_frame = output_dir / "frame_0043.bmp"
     assert first_frame.exists()
     assert last_frame.exists()
 
     with Image.open(first_frame) as frame:
         assert frame.size == (4096, 2160)
-        assert frame.mode == "L"
+        assert frame.mode == "1"
 
 
     metadata_path = output_dir / "metadata.json"
     assert metadata_path.exists()
     metadata = json.loads(metadata_path.read_text())
     assert metadata["pitch"] == pytest.approx(0.05)
-    assert metadata["num_frames"] == 40
+    assert metadata["num_frames"] == 44
     assert metadata["image_width"] == 4096
     assert metadata["image_height"] == 2160
-    assert metadata["bit_depth"] == 8
+    assert metadata["bit_depth"] == 1

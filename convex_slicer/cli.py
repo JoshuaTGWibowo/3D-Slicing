@@ -39,8 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--voxel-size",
         type=float,
-        default=None,
-        help="Override the voxel size used for rasterisation (default: pitch)",
+        default=0.01,
+        help="Override the voxel size used for rasterisation in millimetres (default: 0.01)",
     )
     parser.add_argument(
         "--params",

@@ -28,11 +28,11 @@ python -m convex_slicer.cli path/to/model.stl output_directory --pitch 0.05
 
 Optional arguments:
 
-- `--voxel-size`: specify a custom voxel size (defaults to the pitch).
+- `--voxel-size`: specify a custom voxel size in millimetres (defaults to 0.01 mm).
 - `--params`: path to a JSON file overriding the default material and geometry
   parameters.
 
-Each frame is written as an 8-bit monochrome BMP named `frame_XXXX.bmp`. The
+Each frame is written as a 1-bit monochrome 4K BMP named `frame_XXXX.bmp`. The
 `slicing/metadata.json` file captures the parameters used for the run.
 
 ## Default parameters

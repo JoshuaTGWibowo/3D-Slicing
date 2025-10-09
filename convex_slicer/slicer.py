@@ -16,7 +16,9 @@ from .steady_state import SteadyPhaseProfile, compute_steady_phase_profile
 
 TARGET_WIDTH = 4096
 TARGET_HEIGHT = 2160
-TARGET_MODE = "L"
+TARGET_MODE = "1"
+PIXELS_PER_MM = 50
+DEFAULT_VOXEL_SIZE = 0.01
 
 @dataclass
 class SlicingResult:
@@ -41,7 +43,9 @@ class ConvexSlicer:
     ) -> None:
         self.params = params
         self.pitch = float(pitch)
-        self.voxel_size = float(voxel_size) if voxel_size is not None else float(pitch)
+        if voxel_size is None:
+            voxel_size = DEFAULT_VOXEL_SIZE
+        self.voxel_size = float(voxel_size)
         self.profile = profile or compute_steady_phase_profile(params)
 
     def slice(self, stl_path: Path, output_dir: Path) -> SlicingResult:
@@ -83,15 +87,18 @@ class ConvexSlicer:
 
             "image_width": TARGET_WIDTH,
             "image_height": TARGET_HEIGHT,
-            "bit_depth": 8,
+            "bit_depth": 1,
+            "pixels_per_mm": PIXELS_PER_MM,
 
         }
+        # The inference height output is not required in the current workflow.
+        # metadata["inference_height"] = model_height
 
         for frame in range(num_frames):
             lower = base_surface + frame * self.pitch
             upper = lower + self.pitch
             slice_mask = _slice_mask(occupancy, z_coords, lower, upper)
-            _save_mask(output_dir, frame, slice_mask)
+            _save_mask(output_dir, frame, slice_mask, self.voxel_size)
 
         with (output_dir / "metadata.json").open("w", encoding="utf-8") as fp:
             json.dump(metadata, fp, indent=2)
@@ -155,36 +162,39 @@ def _slice_mask(
     return mask
 
 
-def _save_mask(output_dir: Path, index: int, mask: np.ndarray) -> None:
-    """Write the mask as an 8-bit BMP image with 4K DCI resolution."""
+def _save_mask(output_dir: Path, index: int, mask: np.ndarray, voxel_size: float) -> None:
+    """Write the mask as a 1-bit BMP image with 4K DCI resolution."""
 
-    frame = _render_frame(mask)
+    frame = _render_frame(mask, voxel_size)
     frame.save(output_dir / f"frame_{index:04d}.bmp", format="BMP")
 
 
-def _render_frame(mask: np.ndarray) -> "Image.Image":
-    """Project the boolean mask onto the 4K target canvas."""
-    """Write the mask as an 8-bit BMP image."""
+def _render_frame(mask: np.ndarray, voxel_size: float) -> "Image.Image":
+    """Project the boolean mask onto the 4K target canvas at 50 px/mm."""
 
     from PIL import Image
 
     array = (mask.astype(np.uint8) * 255).T[::-1, :]
-    base_image = Image.fromarray(array).convert(TARGET_MODE)
-    if base_image.size == (TARGET_WIDTH, TARGET_HEIGHT):
-        return base_image
+    base_image = Image.fromarray(array).convert("L")
 
-    width_scale = TARGET_WIDTH / base_image.width if base_image.width else 1.0
-    height_scale = TARGET_HEIGHT / base_image.height if base_image.height else 1.0
-    scale = min(width_scale, height_scale)
-    scaled_width = max(1, min(TARGET_WIDTH, int(round(base_image.width * scale))))
-    scaled_height = max(1, min(TARGET_HEIGHT, int(round(base_image.height * scale))))
+    target_width_px = max(1, int(round(mask.shape[0] * voxel_size * PIXELS_PER_MM)))
+    target_height_px = max(1, int(round(mask.shape[1] * voxel_size * PIXELS_PER_MM)))
 
-    resized = base_image.resize((scaled_width, scaled_height), resample=Image.NEAREST)
+    if base_image.size != (target_width_px, target_height_px):
+        resized = base_image.resize((target_width_px, target_height_px), resample=Image.NEAREST)
+    else:
+        resized = base_image
+
+    if resized.width > TARGET_WIDTH or resized.height > TARGET_HEIGHT:
+        scale = min(TARGET_WIDTH / resized.width, TARGET_HEIGHT / resized.height)
+        scaled_width = max(1, int(round(resized.width * scale)))
+        scaled_height = max(1, int(round(resized.height * scale)))
+        if (scaled_width, scaled_height) != resized.size:
+            resized = resized.resize((scaled_width, scaled_height), resample=Image.NEAREST)
+
+    binary_image = resized.convert(TARGET_MODE, dither=Image.Dither.NONE)
     canvas = Image.new(TARGET_MODE, (TARGET_WIDTH, TARGET_HEIGHT), color=0)
-    left = (TARGET_WIDTH - scaled_width) // 2
-    top = (TARGET_HEIGHT - scaled_height) // 2
-    canvas.paste(resized, (left, top))
+    left = (TARGET_WIDTH - binary_image.width) // 2
+    top = (TARGET_HEIGHT - binary_image.height) // 2
+    canvas.paste(binary_image, (left, top))
     return canvas
-
-    image = Image.fromarray(array)
-    image.save(output_dir / f"frame_{index:04d}.bmp")

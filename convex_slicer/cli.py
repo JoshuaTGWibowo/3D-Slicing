@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from .parameters import PrintingParameters
-from .slicer import ConvexSlicer
+from .slicer import ConvexSlicer, DEFAULT_VOXEL_SIZE
 
 
 DEFAULT_PARAMS = PrintingParameters(
@@ -39,8 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--voxel-size",
         type=float,
-        default=None,
-        help="Override the voxel size used for rasterisation (default: pitch)",
+        default=DEFAULT_VOXEL_SIZE,
+        help=(
+            "Override the voxel size used for rasterisation in millimetres "
+            f"(default: {DEFAULT_VOXEL_SIZE})"
+        ),
     )
     parser.add_argument(
         "--params",
